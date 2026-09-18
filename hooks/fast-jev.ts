@@ -208,6 +208,18 @@ function percent(ratio: number): string {
   return `${Math.round(ratio * 100)}%`;
 }
 
+/**
+ * A single durable line recording the stages that ran, e.g.
+ * `Jev ✓scan ✓score 1 batch ✓prune · kept 5/6 (22%)`. Rendered through
+ * `$.ui.log` so it persists in scrollback — the under-prompt status pips flash
+ * by in a sub-second on a small (single-batch) session, so this is the signal
+ * the user can actually read after the fact.
+ */
+export function stagedSummary(result: CompactResult, kept: number, total: number): string {
+  const batches = result.stats.requests;
+  return `Jev ✓scan ✓score ${batches} batch${batches === 1 ? '' : 'es'} ✓prune · kept ${kept}/${total} (${percent(reductionRatio(result))})`;
+}
+
 export function summarize(result: CompactResult): string {
   const { stats } = result;
   const parts = [
@@ -369,6 +381,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
           },
         ));
       }
+      $.ui.log(stagedSummary(result, messages.length, event.messages.length));
       for (const line of decisionLogLines(result)) $.ui.log(line);
       if (reductionRatio(result) < configured.minReductionRatio) {
         $.ui.status(undefined);
