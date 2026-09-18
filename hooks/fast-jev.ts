@@ -3,7 +3,6 @@ import type {
   On,
   PluginOptions,
   Register,
-  SessionCompactResult,
   SessionMessage,
   ToolResultSummary,
   ToolUseSummary,
@@ -274,32 +273,21 @@ export async function registerJevCompactCommand($: CommandRegisterHook): Promise
   await $.command.register({ name: JEV_COMPACT_COMMAND, description: JEV_COMPACT_DESCRIPTION });
 }
 
-/** The `$` surface `runJevCompactCommand` needs, so it can be tested without an engine. */
-export type SessionCompactHook = {
-  session: {
-    compact: () => Promise<SessionCompactResult>;
-  };
-};
-
 /**
- * Serves the `/jevcompact` command: asks the engine to compact, which re-enters
- * this plugin's own `session.compact` hook, and words the command's output.
+ * Serves the `/jevcompact` command. The host forbids `session.compact()` from a
+ * `command.run` hook (it would compact under the turn the hook is holding), so
+ * the command only flags the request; the `turn.complete` hook runs it once this
+ * turn ends.
  */
-export async function runJevCompactCommand($: SessionCompactHook): Promise<string> {
-  try {
-    const result = await $.session.compact();
-    if ('skip' in result && result.skip) {
-      return `compaction skipped (${result.skip})`;
-    }
-    return 'compaction complete';
-  } catch (error) {
-    return `compaction failed (${error instanceof Error ? error.message : String(error)})`;
-  }
+export function runJevCompactCommand(queue: () => void): string {
+  queue();
+  return 'Jev compaction queued; it runs when this turn completes.';
 }
 
 export const register: Register = (on: On, options: PluginOptions) => {
   const configured = resolveHookConfig(options);
   let compacting = false;
+  let manualRequested = false;
 
   on('session.start', async ($, event, next) => {
     try {
@@ -312,8 +300,8 @@ export const register: Register = (on: On, options: PluginOptions) => {
     return next(event);
   });
 
-  on('command.run', { command: JEV_COMPACT_COMMAND }, async ($) => {
-    return { text: await runJevCompactCommand($) };
+  on('command.run', { command: JEV_COMPACT_COMMAND }, async () => {
+    return { text: runJevCompactCommand(() => { manualRequested = true; }) };
   });
 
   on('session.compact', { trigger: 'plugin' }, async ($, event, next) => {
@@ -348,8 +336,12 @@ export const register: Register = (on: On, options: PluginOptions) => {
   on('turn.complete', async ($, event: TurnCompleteInput, next) => {
     if (compacting) return next(event);
     try {
-      const { context } = await $.session.usage();
-      if ((context.percent ?? 0) < configured.compactAtPercent) return next(event);
+      const manual = manualRequested;
+      manualRequested = false;
+      if (!manual) {
+        const { context } = await $.session.usage();
+        if ((context.percent ?? 0) < configured.compactAtPercent) return next(event);
+      }
       compacting = true;
       await $.session.compact();
     } catch (error) {

@@ -105,29 +105,11 @@ describe('jevcompact command', () => {
     expect(registered).toEqual([{ name: JEV_COMPACT_COMMAND, description: JEV_COMPACT_DESCRIPTION }]);
   });
 
-  it('reports a completed compaction', async () => {
-    const text = await runJevCompactCommand({
-      session: { compact: async () => ({ messages: [], tokensBefore: 10, tokensAfter: 3 }) },
-    });
-    expect(text).toBe('compaction complete');
-  });
-
-  it('reports a vetoed compaction with the skip reason', async () => {
-    const text = await runJevCompactCommand({
-      session: { compact: async () => ({ skip: 'a hook said no' }) },
-    });
-    expect(text).toBe('compaction skipped (a hook said no)');
-  });
-
-  it('reports a failing compaction', async () => {
-    const text = await runJevCompactCommand({
-      session: {
-        compact: async () => {
-          throw new Error('a turn is running');
-        },
-      },
-    });
-    expect(text).toBe('compaction failed (a turn is running)');
+  it('queues the compaction instead of compacting inline', () => {
+    let queued = 0;
+    const text = runJevCompactCommand(() => { queued += 1; });
+    expect(queued).toBe(1);
+    expect(text).toBe('Jev compaction queued; it runs when this turn completes.');
   });
 });
 
