@@ -10,6 +10,7 @@ import type {
 } from 'claude-code';
 
 import { compact, reductionRatio, resolveOptions } from '../src/compact.js';
+import type { CompactProgress } from '../src/compact.js';
 import { buildJevRequest, DEFAULT_MODEL, parseJevResponse } from '../src/request.js';
 import type {
   CompactOptions,
@@ -167,10 +168,40 @@ export async function compactSession(
   messages: readonly SessionMessage[],
   config: HookConfig,
   fetchFn: HookFetch,
+  onProgress?: (progress: CompactProgress) => void,
 ): Promise<SessionCompaction> {
   if (!config.apiKey) throw new Error('TYPESAFE_API_KEY is not configured');
-  const result = await compact(messages, jevAsker(fetchFn, config.apiKey, config.model), config);
+  const result = await compact(
+    messages,
+    jevAsker(fetchFn, config.apiKey, config.model),
+    config,
+    onProgress,
+  );
   return { result, messages: toSessionMessages(messages, result.messages) };
+}
+
+/** The ordered stages the status line lights up as compaction runs. */
+const STATUS_STAGES: readonly { key: CompactProgress['stage']; label: string }[] = [
+  { key: 'scan', label: 'scan' },
+  { key: 'score', label: 'score' },
+  { key: 'prune', label: 'prune' },
+];
+
+/**
+ * Renders one staged status line for the prompt toolbar, e.g.
+ * `Jev ✓scan ◍score 2/4 ·prune`. A finished (`done`) or truncated (`charsAfter`)
+ * result collapses to a one-line summary instead.
+ */
+export function stageStatus(progress: CompactProgress): string {
+  if (progress.stage === 'done') return '';
+  const activeIndex = STATUS_STAGES.findIndex((s) => s.key === progress.stage);
+  const pips = STATUS_STAGES.map((s, index) => {
+    if (index < activeIndex) return `✓${s.label}`;
+    if (index > activeIndex) return `·${s.label}`;
+    if (progress.stage === 'score') return `◍${s.label} ${progress.done}/${progress.total}`;
+    return `◍${s.label}`;
+  });
+  return `Jev ${pips.join('  ')}`;
 }
 
 function percent(ratio: number): string {
@@ -307,24 +338,37 @@ export const register: Register = (on: On, options: PluginOptions) => {
   on('session.compact', { trigger: 'plugin' }, async ($, event, next) => {
     try {
       const config = { ...configured, apiKey: await getApiKey($, configured) };
-      const { result, messages } = await compactSession(event.messages, config, async (url, init) => {
-        const response = await $.http.fetch(url, init);
-        return { status: response.status, ok: response.ok, text: response.text };
-      });
+      const { result, messages } = await compactSession(
+        event.messages,
+        config,
+        async (url, init) => {
+          const response = await $.http.fetch(url, init);
+          return { status: response.status, ok: response.ok, text: response.text };
+        },
+        (progress) => {
+          const line = stageStatus(progress);
+          $.ui.status(line.length > 0 ? line : undefined);
+        },
+      );
       for (const line of decisionLogLines(result)) $.ui.log(line);
       if (reductionRatio(result) < config.minReductionRatio) {
+        $.ui.status(undefined);
         notify(
           $,
           `fallback to built-in summary (below ${percent(config.minReductionRatio)} minimum: ${summarize(result)})`,
         );
         return next(event);
       }
+      $.ui.status(
+        `Jev ✓ kept ${messages.length}/${event.messages.length} · ${percent(reductionRatio(result))} smaller`,
+      );
       notify(
         $,
         `kept ${messages.length}/${event.messages.length} messages, no summary (${summarize(result)})`,
       );
       return { messages };
     } catch (error) {
+      $.ui.status(undefined);
       notify(
         $,
         `fallback to built-in summary (${error instanceof Error ? error.message : String(error)})`,
