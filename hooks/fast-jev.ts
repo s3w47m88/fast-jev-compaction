@@ -319,6 +319,13 @@ export const register: Register = (on: On, options: PluginOptions) => {
   const configured = resolveHookConfig(options);
   let compacting = false;
   let manualRequested = false;
+  // Scored in turn.complete (status visible) and reused by the session.compact
+  // hook, which runs behind the host's compaction overlay where progress cannot show.
+  let precomputed:
+    | { sourceCount: number; result: CompactResult; messages: SessionMessage[]; summary: string }
+    | null = null;
+  // The line the session.compact hook wants pinned once the overlay clears.
+  let pendingStatus: string | undefined;
 
   on('session.start', async ($, event, next) => {
     try {
@@ -336,32 +343,43 @@ export const register: Register = (on: On, options: PluginOptions) => {
   });
 
   on('session.compact', { trigger: 'plugin' }, async ($, event, next) => {
+    const stash = precomputed;
+    precomputed = null;
+    pendingStatus = undefined;
     try {
-      const config = { ...configured, apiKey: await getApiKey($, configured) };
-      const { result, messages } = await compactSession(
-        event.messages,
-        config,
-        async (url, init) => {
-          const response = await $.http.fetch(url, init);
-          return { status: response.status, ok: response.ok, text: response.text };
-        },
-        (progress) => {
-          const line = stageStatus(progress);
-          $.ui.status(line.length > 0 ? line : undefined);
-        },
-      );
+      let result: CompactResult;
+      let messages: SessionMessage[];
+      // Reuse the turn.complete scoring only when it scored the same transcript
+      // the engine now hands us; a differing count means it was truncated, so
+      // rescore here rather than drop older messages.
+      if (stash && stash.sourceCount === event.messages.length) {
+        ({ result, messages } = stash);
+      } else {
+        const config = { ...configured, apiKey: await getApiKey($, configured) };
+        ({ result, messages } = await compactSession(
+          event.messages,
+          config,
+          async (url, init) => {
+            const response = await $.http.fetch(url, init);
+            return { status: response.status, ok: response.ok, text: response.text };
+          },
+          (progress) => {
+            const line = stageStatus(progress);
+            $.ui.status(line.length > 0 ? line : undefined);
+          },
+        ));
+      }
       for (const line of decisionLogLines(result)) $.ui.log(line);
-      if (reductionRatio(result) < config.minReductionRatio) {
+      if (reductionRatio(result) < configured.minReductionRatio) {
         $.ui.status(undefined);
         notify(
           $,
-          `fallback to built-in summary (below ${percent(config.minReductionRatio)} minimum: ${summarize(result)})`,
+          `fallback to built-in summary (below ${percent(configured.minReductionRatio)} minimum: ${summarize(result)})`,
         );
         return next(event);
       }
-      $.ui.status(
-        `Jev ✓ kept ${messages.length}/${event.messages.length} · ${percent(reductionRatio(result))} smaller`,
-      );
+      pendingStatus = `Jev ✓ kept ${messages.length}/${event.messages.length} · ${percent(reductionRatio(result))} smaller`;
+      $.ui.status(pendingStatus);
       notify(
         $,
         `kept ${messages.length}/${event.messages.length} messages, no summary (${summarize(result)})`,
@@ -387,13 +405,46 @@ export const register: Register = (on: On, options: PluginOptions) => {
         if ((context.percent ?? 0) < configured.compactAtPercent) return next(event);
       }
       compacting = true;
+      // Score with visible staged progress now, before session.compact draws the
+      // host's compaction overlay over the status line.
+      try {
+        const config = { ...configured, apiKey: await getApiKey($, configured) };
+        const source = await $.session.messages();
+        const { result, messages } = await compactSession(
+          source,
+          config,
+          async (url, init) => {
+            const response = await $.http.fetch(url, init);
+            return { status: response.status, ok: response.ok, text: response.text };
+          },
+          (progress) => {
+            const line = stageStatus(progress);
+            $.ui.status(line.length > 0 ? line : undefined);
+          },
+        );
+        precomputed = {
+          sourceCount: source.length,
+          result,
+          messages,
+          summary: `Jev ✓ kept ${messages.length}/${source.length} · ${percent(reductionRatio(result))} smaller`,
+        };
+      } catch (error) {
+        precomputed = null;
+        $.ui.status(undefined);
+        $.ui.log(
+          `Jev pre-scan skipped (${error instanceof Error ? error.message : String(error)})`,
+        );
+      }
       await $.session.compact();
+      // Re-pin the outcome: the post-compaction context reset drops the status set inside the hook.
+      $.ui.status(pendingStatus);
     } catch (error) {
       $.ui.log(
         `auto-compact skipped (${error instanceof Error ? error.message : String(error)})`,
       );
     } finally {
       compacting = false;
+      precomputed = null;
     }
     return next(event);
   });
