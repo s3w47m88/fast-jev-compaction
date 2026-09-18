@@ -10,6 +10,7 @@ import {
   registerJevCompactCommand,
   resolveHookConfig,
   runJevCompactCommand,
+  stageStatus,
   summarize,
   toSessionMessages,
 } from '../hooks/fast-jev.ts';
@@ -190,5 +191,17 @@ describe('compactSession', () => {
     await expect(
       compactSession(transcript(), { ...config, apiKey: 'k' }, async () => ({ status: 500, ok: false, text: 'x' })),
     ).rejects.toThrow(/500/);
+  });
+});
+
+describe('stageStatus', () => {
+  it('lights up the active stage and marks earlier ones done', () => {
+    expect(stageStatus({ stage: 'scan', calls: 12 })).toBe('Jev ◍scan  ·score  ·prune');
+    expect(stageStatus({ stage: 'score', done: 2, total: 4 })).toBe('Jev ✓scan  ◍score 2/4  ·prune');
+    expect(stageStatus({ stage: 'prune' })).toBe('Jev ✓scan  ✓score  ◍prune');
+  });
+
+  it('returns an empty line when done so the caller clears the pin', () => {
+    expect(stageStatus({ stage: 'done' })).toBe('');
   });
 });

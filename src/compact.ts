@@ -247,23 +247,35 @@ function count(decisions: readonly CallDecision[], reason: CallDecision['reason'
   return decisions.filter((decision) => decision.reason === reason).length;
 }
 
+/** Progress a caller can surface as staged UI while `compact` runs. */
+export type CompactProgress =
+  | { stage: 'scan'; calls: number }
+  | { stage: 'score'; done: number; total: number }
+  | { stage: 'prune' }
+  | { stage: 'done' };
+
 /**
  * Compacts a transcript by asking Jev, for every tool call outside the pinned
  * first and newest messages, whether the call and whether its result must
  * stay. The whole history (results omitted, fitted into `maxStateTokens`) is
  * sent as state with every batch of questions. Throws when Jev fails or the
  * history cannot be fitted; the caller decides whether to fall back.
+ *
+ * `onProgress`, when given, is called as each phase (scan, score, prune, done)
+ * is reached, so a host can pin staged indicators while the work runs.
  */
 export async function compact(
   messages: readonly Message[],
   asker: JevAsker,
   options: CompactOptions = {},
+  onProgress?: (progress: CompactProgress) => void,
 ): Promise<CompactResult> {
   const started = Date.now();
   const resolved = resolveOptions(options);
   const calls = collectToolCalls(messages, resolved.preserveRecentMessages);
   const candidates = calls.filter((call) => !call.pinned);
   const charsBefore = messages.reduce((sum, message) => sum + messageChars(message), 0);
+  onProgress?.({ stage: 'scan', calls: candidates.length });
 
   let fitted: { tokens: number; stage: string } = { tokens: 0, stage: '' };
   let batches: ToolCall[][] = [];
@@ -272,11 +284,19 @@ export async function compact(
     const state = fitState(messages, calls, resolved);
     fitted = state;
     batches = batchCalls(candidates, state.tokens, resolved);
+    let done = 0;
+    onProgress?.({ stage: 'score', done, total: batches.length });
     const answered = await Promise.all(
-      batches.map((batch) => askBatch(asker, state.state, batch)),
+      batches.map(async (batch) => {
+        const map = await askBatch(asker, state.state, batch);
+        done += 1;
+        onProgress?.({ stage: 'score', done, total: batches.length });
+        return map;
+      }),
     );
     for (const map of answered) for (const [id, answer] of map) answers.set(id, answer);
   }
+  onProgress?.({ stage: 'prune' });
 
   const decisions = calls.map((call) =>
     decideCall(call, answers.get(call.id) ?? { keepCall: 1, keepResult: 1 }, resolved),
@@ -287,6 +307,7 @@ export async function compact(
     calls,
     resolved.truncateHeadChars,
   );
+  onProgress?.({ stage: 'done' });
   return {
     messages: kept,
     decisions,
