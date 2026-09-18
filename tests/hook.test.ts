@@ -11,6 +11,7 @@ import {
   resolveHookConfig,
   runJevCompactCommand,
   stageStatus,
+  stagedSummary,
   summarize,
   toSessionMessages,
 } from '../hooks/fast-jev.ts';
@@ -203,5 +204,21 @@ describe('stageStatus', () => {
 
   it('returns an empty line when done so the caller clears the pin', () => {
     expect(stageStatus({ stage: 'done' })).toBe('');
+  });
+});
+
+describe('stagedSummary', () => {
+  const result = (requests: number, charsBefore: number, charsAfter: number) =>
+    ({ stats: { requests, charsBefore, charsAfter } }) as unknown as Parameters<
+      typeof stagedSummary
+    >[0];
+
+  it('records the stages, batch count and outcome in one durable line', () => {
+    expect(stagedSummary(result(1, 100, 78), 5, 6)).toBe(
+      'Jev ✓scan ✓score 1 batch ✓prune · kept 5/6 (22%)',
+    );
+    expect(stagedSummary(result(3, 100, 60), 8, 12)).toBe(
+      'Jev ✓scan ✓score 3 batches ✓prune · kept 8/12 (40%)',
+    );
   });
 });
